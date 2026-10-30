@@ -1,0 +1,59 @@
+ `mas mirror-images` is nearing completion; mirroring the final MAS CLI image. Disk usage has reached approximately 34.3 GB. The CA certificate needed for
+  configuration is pre-staged in the container for convenience.
+
+  Based on the IBM MAS Private Registry Guide https://ibm-mas.github.io/cli/guides/private-registry/, the private registry air-gap workflow consists of:
+
+  1. mas setup-registry (Completed)
+  2. mas mirror-images (Currently completing its final task at ~34.3 GB)
+  3. mas configure-airgap ⬅️ THIS IS YOUR NEXT STEP
+  ──────
+  ### What mas configure-airgap Does
+  Once mas mirror-images finishes, your private registry has all the images, but your OpenShift cluster does not know how to use them yet.
+  Running mas configure-airgap:
+  1. Configures ImageDigestMirrorSet (IDMS) / ICSP: Tells OpenShift to redirect requests for cp.icr.io, quay.io, and icr.io to your private registry (192.168.2.
+  225:32500/jllairgap/...).
+  2. Updates the Global Cluster Pull Secret: Injects your registry credentials (jllairgap:jllairgap@2026) into openshift-config/pull-secret so every cluster
+  node can authenticate and pull images.
+  3. Trusts the Registry CA Certificate: Adds the registry's root CA to OpenShift's trusted CA bundle so nodes trust its TLS certificate.
+  ──────
+  ### Preparation Done for You:
+
+  mas configure-airgap will ask for the Registry CA File.
+  I have already extracted the CA certificate from OpenShift and saved it to:
+  • Windows Host: ca.crt
+  • Inside Container: /mnt/registry/ca.crt
+  ──────
+  ### Step-by-Step Instructions:
+
+  #### Step 1: Wait for mas mirror-images to return to the prompt
+
+  Once the CLI image finishes mirroring, the prompt will return:
+
+    [ibmmas/cli:23.17.1]mascli$
+
+  #### Step 2: Run mas configure-airgap
+
+  In the same container, run:
+
+    mas configure-airgap
+
+  #### Step 3: Provide the following inputs when prompted:
+
+   Prompt                                             │ Recommended Value                                  │ Notes
+  ────────────────────────────────────────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────────────
+   Mirror Registry Host                               │ 192.168.2.225                                      │ Node IP of your cluster
+   Mirror Registry Port                               │ 32500                                              │ Registry NodePort
+   Mirror Registry Prefix                             │ jllairgap                                          │ The repository prefix used during mirror
+   Mirror Registry CA File                            │ /mnt/registry/ca.crt                               │ (Already prepared and verified)
+   Mirror Registry Username                           │ jllairgap                                          │
+   Mirror Registry Password                           │ jllairgap@2026                                     │
+   Enable IBM managed Red Hat catalogs?               │ n (or y if you mirrored RH catalogs)               │ Default is n if only MAS was mirrored
+   Enable IBM managed Red Hat Release?                │ n                                                  │
+  ──────
+  ### What Comes After mas configure-airgap?
+
+  After the airgap configuration is applied to OpenShift:
+
+  1. OpenShift will create the ImageDigestMirrorSet resources.
+  2. You can proceed with installing the IBM Operator Catalog and the suite using:
+    mas install
