@@ -1,0 +1,108 @@
+Here is a clean, comprehensive, and well-structured reference document combining the Root Cause Analysis (RCA), the troubleshooting journey, and the successful resolution for your air-gap container registry deployment on OpenShift. You can save this directly as a Markdown (`.md`) or documentation file.
+
+---
+
+# Reference Documentation: Resolving LVM Storage Deadlock & Deploying Air-Gap Registry on OpenShift
+
+## 1. Executive Summary
+
+This document records the root cause analysis, diagnostic steps, and ultimate resolution for deploying a persistent container registry (`registry:2`) backed by a file-backed virtual loop device (`/dev/loop1`) and the TopoLVM storage operator (`lvms-vg1`) in an IBM MAS / MREF environment on a single-node bare-metal OpenShift cluster.
+
+---
+
+## 2. Environment & Architecture Strategy
+
+* **Platform:** Single-node bare-metal OpenShift cluster.
+* **Storage Strategy:** File-backed virtual loop device (`/dev/loop1`) created from a sparse image file (`/var/local/lvms/registry-disk.img`) due to the lack of raw physical block devices.
+* **Orchestration:** TopoLVM (OpenShift LVM Storage) Operator (`openshift-storage`).
+* **Registry Target:** `airgap-registry` namespace (`registry:2`, 100Gi storage capacity).
+
+---
+
+## 3. Root Cause Analysis (The Deadlock Issue)
+
+### Symptoms
+
+* PersistentVolumeClaims (`airgap-registry-storage`) and registry pods remained permanently stuck in `Pending` with scheduling errors: `0/1 nodes are available: 1 node(s) did not have enough free storage`.
+* CSINode configuration showed null drivers, indicating the TopoLVM CSI driver never initialized on the node.
+
+### Underlying Cause
+
+A critical host-level lock contention and resource conflict occurred due to **duplicate LVM Storage operator installations**:
+
+1. **`openshift-lvm-storage` (Legacy/Broken):** Contained a conflicting `LVMCluster` targeting a non-existent physical disk (`/dev/nvme1n1`), causing it to fail. However, its active `vg-manager` daemon acquired and held the host-level file lock: `/var/lock/vgmanager/vgmanager.lock`.
+2. **`openshift-storage` (Correct):** Configured with `LVMCluster` targeting `/dev/loop1`. Its `vg-manager` daemon was permanently blocked in an infinite loop waiting to acquire the same file lock:
+```json
+{"level":"info","msg":"Waiting for lock to be released","lockFile":"/var/lock/vgmanager/vgmanager.lock"}
+
+```
+
+
+
+Because the correct `vg-manager` was locked out, it could not initialize Volume Group `vg1`, spawn the TopoLVM CSI node drivers, or provision storage for the registry.
+
+---
+
+## 4. Resolution Steps Executed
+
+### Step 1: Purge the Conflicting Duplicate Operator
+
+Removed the broken conflicting LVM installation from the legacy namespace:
+
+```bash
+# Remove finalizers if deletion hangs
+oc patch lvmcluster jll-airgap -n openshift-lvm-storage -p '{"metadata":{"finalizers":[]}}' --type=merge
+oc delete lvmcluster jll-airgap -n openshift-lvm-storage
+
+# Delete conflicting operator subscription and CSV
+oc delete subscription lvms-operator -n openshift-lvm-storage
+oc delete csv -n openshift-lvm-storage $(oc get csv -n openshift-lvm-storage -o jsonpath='{.items[?(@.spec.displayName=="LVM Storage")].metadata.name}')
+
+```
+
+### Step 2: Release the Host File Lock & Clean State
+
+Freed the contended file lock and cleared stale device-mapper references for volume group `vg1`:
+
+```bash
+oc debug node/<node-name> -- chroot /host rm -f /var/lock/vgmanager/vgmanager.lock
+
+```
+
+### Step 3: Restart the Correct LVM Manager Daemon
+
+Restarted the `vg-manager` pod in the correct namespace to force initialization:
+
+```bash
+oc delete pod -n openshift-storage -l app.kubernetes.io/name=vg-manager
+
+```
+
+### Step 4: Re-initialize the Registry Deployment
+
+Cleaned up lingering namespace/PVC objects and deployed the registry cleanly using the correct TopoLVM storage class (`lvms-vg1`):
+
+```bash
+mas teardown-registry -n airgap-registry --no-confirm
+REGISTRY_USERNAME="jllairgap" REGISTRY_PASSWORD="jllairgap@2026" mas setup-registry -n airgap-registry -s lvms-vg1
+
+```
+
+---
+
+## 5. Verification & Final Status
+
+Running validation checks confirmed successful deployment:
+
+```bash
+oc get pvc,pods -n airgap-registry
+
+```
+
+* **PersistentVolumeClaim:** `Bound` to `pvc-...` (Capacity: `100Gi`, StorageClass: `lvms-vg1`)
+* **Registry Pod:** `Running` (`1/1`, 0 restarts)
+* **Accessibility:** Listening successfully on port `5000` with valid internal TLS certificates and htpasswd authentication.
+
+---
+
+*Reference documented and verified for operational continuity.*
