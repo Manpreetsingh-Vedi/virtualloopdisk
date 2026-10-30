@@ -1,0 +1,2 @@
+# virtualloopdisk
+Baremetal openshift
